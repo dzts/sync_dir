@@ -1,0 +1,242 @@
+#!/bin/sh
+#date 2015-11-28
+
+#current dir
+CURRENT_DIR=`pwd`
+
+#script dir
+SCRIPT_DIR=$(cd `dirname $0`;pwd)
+
+#tmp dir
+TMP_DIR=/tmp/ftp_download/`date +%s`_$RANDOM
+
+#generate ftp cmd of in dir
+FTP_CMD_DIR=$TMP_DIR
+
+#delete more file or more directory,default is not delete
+FTP_DELETE_MORE=0
+
+#NOT_DOWNLOAD default value 1,use not download default config file;
+#0 is not use undownload config file
+#when is a file, file is to used
+NOT_DOWNLOAD=$SCRIPT_DIR/config/not_download
+
+NOT_DOWNLOAD_ENABLE=1
+
+#get options
+while getopts "r:l:n:sde" arg
+do
+	case $arg in
+	   r)
+			#remote server program dir
+			REMOTE_PWD=`echo $OPTARG | cut -d ":" -f2`;
+			#remote server ssh config;eg root@127.0.0.1
+			SSH_INFO=`echo $OPTARG | cut -d ":" -f1`;
+			;;
+	   l)
+			#local server program dir
+			LOCAL_PWD=$OPTARG
+			;;
+	   n)
+			#not_upload_file
+			NOT_DOWNLOAD=$OPTARG
+			if [ -f $NOT_DOWNLOAD ];then
+				NOT_DOWNLOAD=`readlink -f $NOT_DOWNLOAD`
+			else
+				NOT_DOWNLOAD=$SCRIPT_DIR/config/not_download
+			fi
+	   		;;
+	   e)
+			NOT_DOWNLOAD_ENABLE=0
+			;;
+	   s)
+			FTP_CMD_DIR=$CURRENT_DIR
+			;;
+	   d)
+			FTP_DELETE_MORE=1
+			;;
+	esac
+done
+
+function cmdTip(){
+	echo -e "\033[40;36mplease exec sftp_download -r [username@host:path] -l path -n [not download file config] -sde";
+	echo -e "option:"
+	echo -e "-r SSH configuration and directory of remote services；e'g:root@192.168.0.3:/var/test"
+	echo -e "-l Local directory"
+	echo -e "-n not_download configuration file"
+	echo -e "-s Specify a directory to generate the SFTP command script"
+	echo -e "-d Are you sure you want to delete the unnecessary files and directories on the remote server"
+	echo -e "-e Do not use the not_download configuration";
+	echo -e "\033[0m";
+	exit;
+}
+
+if [ x$REMOTE_PWD == "x" ];then
+	cmdTip
+fi
+
+if [ x$SSH_INFO == "x" ];then
+	cmdTip
+fi
+
+if [ x$LOCAL_PWD == "x" ];then
+	cmdTip
+fi
+
+mkdir -p $TMP_DIR
+
+if [ ! -f $LOCAL_PWD ];then
+	mkdir -p $LOCAL_PWD
+fi
+
+cd $LOCAL_PWD
+
+function getLocalDirInfo(){
+	#generate local server file of md5
+	find * -type f  | grep -v "\/\." | xargs  md5sum > $TMP_DIR/local_md5.txt
+	
+	#generate local server dir of list
+	ls -lR | grep "^./" | awk '{ sub("./","",$0); sub(":","",$0) ; print $0 }' > $TMP_DIR/local_dir.txt
+}
+
+getLocalDirInfo
+
+cd $SCRIPT_DIR;
+
+#login remote server and generate file of md5 and generate file of dir's list
+function getRemoteDirInfo(){
+
+	echo -e "\nssh login remote server exec command for list of dir and md5 info of file"
+
+	ssh -2 $SSH_INFO "if [ ! -d $REMOTE_PWD ];then echo ""; fi;cd $REMOTE_PWD;find * -type f 2>/dev/null | grep -v '\/\.' | xargs md5sum" > $TMP_DIR/remote_md5.txt
+
+	if [ $? != 0 ];then
+		echo "can't login remote server!";
+		exit;
+	fi
+
+	ssh -2 $SSH_INFO "cd $REMOTE_PWD;ls -lR | grep '^./'" > $TMP_DIR/remote_dir_tmp.txt
+
+	cat $TMP_DIR/remote_dir_tmp.txt | awk '{ sub("./","",$0); sub(":","",$0) ; print $0 }' > $TMP_DIR/remote_dir.txt
+
+	echo -e "\nget remote server program info"
+
+	rm -f $TMP_DIR/remote_dir_tmp.txt
+
+}
+
+getRemoteDirInfo
+
+#generate modify file delete file,add dir delete dir 
+function generateModifyInfoFile(){
+	#generate modify file
+	awk -f downloadawk/modify.awk -v TMP_DIR="$TMP_DIR" $TMP_DIR/local_md5.txt $TMP_DIR/remote_md5.txt | awk '{print $2}' >$TMP_DIR/modify_md5.txt
+
+	if [ $NOT_DOWNLOAD_ENABLE -eq 1 ];then
+		if [ -f $NOT_DOWNLOAD ];then
+			cp $NOT_DOWNLOAD $TMP_DIR/not_download
+			awk -f downloadawk/not_download.awk -v TMP_DIR="$TMP_DIR" $TMP_DIR/not_download $TMP_DIR/modify_md5.txt >$TMP_DIR/modify_tmp_md5.txt
+			cat $TMP_DIR/modify_tmp_md5.txt > $TMP_DIR/modify_md5.txt
+		fi
+	fi
+
+	#generate delete file
+	awk -f downloadawk/delete.awk -v TMP_DIR="$TMP_DIR" $TMP_DIR/local_md5.txt $TMP_DIR/remote_md5.txt > $TMP_DIR/delete_md5.txt
+
+	#generate add dir
+	awk -f downloadawk/modify_dir.awk -v TMP_DIR="$TMP_DIR" $TMP_DIR/local_dir.txt $TMP_DIR/remote_dir.txt > $TMP_DIR/modify_dir.txt
+
+	#generate delete dir
+	awk -f downloadawk/delete_dir.awk -v TMP_DIR="$TMP_DIR" $TMP_DIR/local_dir.txt $TMP_DIR/remote_dir.txt > $TMP_DIR/delete_dir.txt
+}
+
+generateModifyInfoFile
+
+#generate sftp command
+function generateFtpCmdScript(){
+	echo "#!/bin/sh" > $FTP_CMD_DIR/ftp_download_cmd.sh
+	echo "cd $LOCAL_PWD;" >> $FTP_CMD_DIR/ftp_download_cmd.sh
+	
+	if [ $FTP_DELETE_MORE -eq 1 ];then
+		have_change=`cat $TMP_DIR/delete_md5.txt $TMP_DIR/delete_dir.txt $TMP_DIR/modify_dir.txt $TMP_DIR/modify_md5.txt`
+	else
+		have_change=`cat $TMP_DIR/modify_dir.txt $TMP_DIR/modify_md5.txt`
+	fi
+	#no change
+	if [ -z "$have_change" ]; then
+		echo -e "\nno change!";
+		exit;
+	fi
+	
+	if [ $FTP_DELETE_MORE -eq 1 ];then
+		#generate ftp command delete file
+		cat $TMP_DIR/delete_md5.txt | while read line
+
+		do
+  			echo "rm -f $line" >> $FTP_CMD_DIR/ftp_download_cmd.sh
+		done
+
+		#generate ftp command delete dir
+		cat $TMP_DIR/delete_dir.txt | sort -r | while read line
+
+		do
+    		echo "rmdir $line" >> $FTP_CMD_DIR/ftp_download_cmd.sh
+		done
+	fi
+
+	echo "sftp $SSH_INFO:$REMOTE_PWD << EOF" >> $FTP_CMD_DIR/ftp_download_cmd.sh
+
+	#generate ftp command add dir
+	cat $TMP_DIR/modify_dir.txt | while read line
+
+	do
+    	echo "lmkdir $line" >> $FTP_CMD_DIR/ftp_download_cmd.sh
+	done
+
+	#generate ftp command put file
+	cat $TMP_DIR/modify_md5.txt | while read line
+
+	do
+  		echo "mget $line $line" >> $FTP_CMD_DIR/ftp_download_cmd.sh
+	done
+
+	echo "quit" >> $FTP_CMD_DIR/ftp_download_cmd.sh
+
+	echo "EOF" >> $FTP_CMD_DIR/ftp_download_cmd.sh
+
+	chmod +x $FTP_CMD_DIR/ftp_download_cmd.sh
+
+	echo -e "\n"
+
+	cat $FTP_CMD_DIR/ftp_download_cmd.sh
+
+	#delete temp file
+	rm -f $TMP_DIR/delete_dir.txt $TMP_DIR/delete_md5.txt $TMP_DIR/modify_dir.txt $TMP_DIR/modify_md5.txt
+
+}
+
+generateFtpCmdScript
+
+#modify sftp command,or exec sftp command
+function modifyFtpCmdOrExecFtpCmd(){
+	echo -e "\nhave generate ftp command!please sure ftp command,next exec ftp_download_cmd.sh\n"
+
+	read -p "are you sure to exec or edit ftp_download_cmd.sh(yes/edit/no)?" res
+
+	if [ $res = "y" ] || [ $res = "yes" ]; then
+		echo ""
+		$FTP_CMD_DIR/ftp_download_cmd.sh
+		echo "download complete!"
+	fi;
+
+	if [ $res = "edit" ] || [ $res = "e" ]; then
+		vim $FTP_CMD_DIR/ftp_download_cmd.sh
+		read -p "are you sure to exec ftp_download_cmd.sh(yes/no)?" res
+		if [ $res = "y" ] || [ $res = "yes" ]; then
+			$FTP_CMD_DIR/ftp_download_cmd.sh
+			echo "\ndownload complete"
+		fi;
+	fi
+}
+
+modifyFtpCmdOrExecFtpCmd

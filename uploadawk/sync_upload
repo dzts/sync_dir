@@ -1,0 +1,243 @@
+#!/bin/sh
+#date 2015-11-28
+
+#current dir
+CURRENT_DIR=`pwd`
+
+#script dir
+SCRIPT_DIR=$(cd `dirname $0`;pwd)
+
+#tmp dir
+TMP_DIR=/tmp/ftp_upload/`date +%s`_$RANDOM
+
+#generate ftp cmd of in dir
+FTP_CMD_DIR=$TMP_DIR
+
+#delete more file or more directory,default is not delete
+FTP_DELETE_MORE=0
+
+#NOT_UPLOAD default value 1,use not upload default config file;
+#0 is not use unupload config file
+#when is a file, file is to used
+NOT_UPLOAD=$SCRIPT_DIR/config/not_upload
+
+NOT_UPLOAD_ENABLE=1
+
+#get options
+while getopts "r:l:n:sde" arg
+do
+	case $arg in
+	   r)
+			#remote server program dir
+			REMOTE_PWD=`echo $OPTARG | cut -d ":" -f2`;
+			#remote server ssh config;eg root@127.0.0.1
+			SSH_INFO=`echo $OPTARG | cut -d ":" -f1`;
+			;;
+	   l)
+			#local server program dir
+			LOCAL_PWD=$OPTARG
+			;;
+	   n)
+			#not_upload_file
+			NOT_UPLOAD=$OPTARG
+			if [ -f $NOT_UPLOAD ];then
+				NOT_UPLOAD=`readlink -f $NOT_UPLOAD`
+			else
+				NOT_UPLOAD=$SCRIPT_DIR/config/not_upload
+			fi
+	   		;;
+	   e)
+			NOT_UPLOAD_ENABLE=0
+			;;
+	   s)
+			FTP_CMD_DIR=$CURRENT_DIR
+			;;
+	   d)
+			FTP_DELETE_MORE=1
+			;;
+	esac
+done
+
+function cmdTip(){
+	echo -e "\033[40;36mplease exec sftp_upload -r [username@host:path] -l path -n [not upload file config] -sde";
+	echo -e "option:"
+	echo -e "-r SSH configuration and directory of remote services；e'g:root@192.168.0.3:/var/test"
+	echo -e "-l Local directory"
+	echo -e "-n not_upload configuration file"
+	echo -e "-s Specify a directory to generate the SFTP command script"
+	echo -e "-d Are you sure you want to delete the unnecessary files and directories on the remote server"
+	echo -e "-e Do not use the not_upload configuration";
+	echo -e "\033[0m";
+	exit;
+}
+
+if [ x$REMOTE_PWD == "x" ];then
+	cmdTip
+fi
+
+if [ x$SSH_INFO == "x" ];then
+	cmdTip
+fi
+
+if [ x$LOCAL_PWD == "x" ];then
+	cmdTip
+fi
+
+mkdir -p $TMP_DIR
+
+cd $LOCAL_PWD
+
+if [ ! -d $LOCAL_PWD ] ; then
+	echo -e "\nlocal server dir $LOCAL_PWD not exist";
+	exit;
+fi
+
+function getLocalDirInfo(){
+	#generate local server file of md5
+	find * -type f  | grep -v "\/\." | xargs  md5sum > $TMP_DIR/local_md5.txt
+	
+	#generate local server dir of list
+	ls -lR | grep "^./" | awk '{ sub("./","",$0); sub(":","",$0) ; print $0 }' > $TMP_DIR/local_dir.txt
+}
+
+getLocalDirInfo
+
+cd $SCRIPT_DIR;
+
+#login remote server and generate file of md5 and generate file of dir's list
+function getRemoteDirInfo(){
+
+	echo -e "\nssh login remote server exec command for list of dir and md5 info of file"
+
+	ssh -2 $SSH_INFO "if [ ! -d $REMOTE_PWD ];then mkdir -p $REMOTE_PWD;fi;cd $REMOTE_PWD;find * -type f 2>/dev/null | grep -v '\/\.' | xargs md5sum" > $TMP_DIR/remote_md5.txt
+
+	if [ $? != 0 ];then
+		echo "can't login remote server!";
+		exit;
+	fi
+
+	ssh -2 $SSH_INFO "cd $REMOTE_PWD;ls -lR | grep '^./'" > $TMP_DIR/remote_dir_tmp.txt
+
+	cat $TMP_DIR/remote_dir_tmp.txt | awk '{ sub("./","",$0); sub(":","",$0) ; print $0 }' > $TMP_DIR/remote_dir.txt
+
+	echo -e "\nget remote server program info"
+
+	rm -f $TMP_DIR/remote_dir_tmp.txt
+
+}
+
+getRemoteDirInfo
+
+#generate modify file delete file,add dir delete dir 
+function generateModifyInfoFile(){
+	#generate modify file
+	awk -f uploadawk/modify.awk -v TMP_DIR="$TMP_DIR" $TMP_DIR/local_md5.txt $TMP_DIR/remote_md5.txt | awk '{print $2}' >$TMP_DIR/modify_md5.txt
+
+	if [ $NOT_UPLOAD_ENABLE -eq 1 ];then
+		if [ -f $NOT_UPLOAD ];then
+			cp $NOT_UPLOAD $TMP_DIR/not_upload
+			awk -f uploadawk/not_upload.awk -v TMP_DIR="$TMP_DIR" $TMP_DIR/not_upload $TMP_DIR/modify_md5.txt >$TMP_DIR/modify_tmp_md5.txt
+			cat $TMP_DIR/modify_tmp_md5.txt > $TMP_DIR/modify_md5.txt
+		fi
+	fi
+
+	#generate delete file
+	awk -f uploadawk/delete.awk -v TMP_DIR="$TMP_DIR" $TMP_DIR/local_md5.txt $TMP_DIR/remote_md5.txt > $TMP_DIR/delete_md5.txt
+
+	#generate add dir
+	awk -f uploadawk/modify_dir.awk -v TMP_DIR="$TMP_DIR" $TMP_DIR/local_dir.txt $TMP_DIR/remote_dir.txt > $TMP_DIR/modify_dir.txt
+
+	#generate delete dir
+	awk -f uploadawk/delete_dir.awk -v TMP_DIR="$TMP_DIR" $TMP_DIR/local_dir.txt $TMP_DIR/remote_dir.txt > $TMP_DIR/delete_dir.txt
+}
+
+generateModifyInfoFile
+
+#generate sftp command
+function generateFtpCmdScript(){
+	echo "#!/bin/sh" > $FTP_CMD_DIR/ftp_upload_cmd.sh
+	echo "cd $LOCAL_PWD;" >> $FTP_CMD_DIR/ftp_upload_cmd.sh
+	echo "sftp $SSH_INFO:$REMOTE_PWD << EOF" >> $FTP_CMD_DIR/ftp_upload_cmd.sh
+	
+	if [ $FTP_DELETE_MORE -eq 1 ];then
+		have_change=`cat $TMP_DIR/delete_md5.txt $TMP_DIR/delete_dir.txt $TMP_DIR/modify_dir.txt $TMP_DIR/modify_md5.txt`
+	else
+		have_change=`cat $TMP_DIR/modify_dir.txt $TMP_DIR/modify_md5.txt`
+	fi
+	#no change
+	if [ -z "$have_change" ]; then
+		echo "";
+		echo "no change!";
+		exit;
+	fi
+	
+	if [ $FTP_DELETE_MORE -eq 1 ];then
+		#generate ftp command delete file
+		cat $TMP_DIR/delete_md5.txt | while read line
+
+		do
+  			echo "rm $line" >> $FTP_CMD_DIR/ftp_upload_cmd.sh
+		done
+
+		#generate ftp command delete dir
+		cat $TMP_DIR/delete_dir.txt | while read line
+
+		do
+    		echo "rmdir $line" >> $FTP_CMD_DIR/ftp_upload_cmd.sh
+		done
+	fi
+
+	#generate ftp command add dir
+	cat $TMP_DIR/modify_dir.txt | while read line
+
+	do
+    	echo "mkdir $line" >> $FTP_CMD_DIR/ftp_upload_cmd.sh
+	done
+
+	#generate ftp command put file
+	cat $TMP_DIR/modify_md5.txt | while read line
+
+	do
+  		echo "put $line $line" >> $FTP_CMD_DIR/ftp_upload_cmd.sh
+	done
+
+	echo "quit" >> $FTP_CMD_DIR/ftp_upload_cmd.sh
+
+	echo "EOF" >> $FTP_CMD_DIR/ftp_upload_cmd.sh
+
+	chmod +x $FTP_CMD_DIR/ftp_upload_cmd.sh
+
+	echo -e "\n"
+
+	cat $FTP_CMD_DIR/ftp_upload_cmd.sh
+
+	#delete temp file
+	#rm -f $TMP_DIR/delete_dir.txt $TMP_DIR/delete_md5.txt $TMP_DIR/modify_dir.txt $TMP_DIR/modify_md5.txt
+
+}
+
+generateFtpCmdScript
+
+#modify sftp command,or exec sftp command
+function modifyFtpCmdOrExecFtpCmd(){
+	echo -e "\nhave generate ftp command!please sure ftp command,next exec ftp_upload_cmd.sh\n"
+
+	read -p "are you sure to exec or edit ftp_upload_cmd.sh(yes/edit/no)?" res
+
+	if [ $res = "y" ] || [ $res = "yes" ]; then
+		echo ""
+		$FTP_CMD_DIR/ftp_upload_cmd.sh
+		echo "upload complete!"
+	fi;
+
+	if [ $res = "edit" ] || [ $res = "e" ]; then
+		vim $FTP_CMD_DIR/ftp_upload_cmd.sh
+		read -p "are you sure to exec ftp_upload_cmd.sh(yes/no)?" res
+		if [ $res = "y" ] || [ $res = "yes" ]; then
+			$FTP_CMD_DIR/ftp_upload_cmd.sh
+			echo "\nupload complete"
+		fi;
+	fi
+}
+
+modifyFtpCmdOrExecFtpCmd
