@@ -7,7 +7,7 @@
 	sync_upload from the local host synchronization directory to the remote server script
 	uploadawk parsing data awk
 
-3.command sftp_download
+3.command sync_download
 
   	sync_download -r [username@host:path] -l path -n [not download file config] -sde
 	option:
@@ -18,7 +18,7 @@
 	  -d Are you sure you want to delete the unnecessary files and directories on the remote server
 	  -e Do not use the not_download configuration
 
-4.command sftp_upload
+4.command sync_upload
 
 	sync_upload -r [username@host:path] -l path -n [not upload file config] -sde
 	option:
