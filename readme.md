@@ -1,13 +1,14 @@
-##This is a folder for the synchronization process, using SFTP to achieve.##
+###This is a folder for the synchronization process, using SFTP to achieve.###
 
-##Program directory structure:##
-	Config configuration file
-	downloadawk parsing data awk
-	sync_download from the remote server synchronization directory to the local script
-	sync_upload from the local host synchronization directory to the remote server script
-	uploadawk parsing data awk
+####Program directory structure:####
+	sync_dir
+	|----Config        Configuration file
+	|----downloadawk   Parsing data awk
+	|----sync_download From the remote server synchronization directory to the local script
+	|----sync_upload   From the local host synchronization directory to the remote server script
+	|----uploadawk     Parsing data awk
 
-##command sync_download##
+####command sync_download####
 
   	sync_download -r [username@host:path] -l path -n [not download file config] -sde
 	option:
@@ -18,7 +19,7 @@
 	  -d Are you sure you want to delete the unnecessary files and directories on the remote server
 	  -e Do not use the not_download configuration
 
-##command sync_upload##
+####command sync_upload####
 
 	sync_upload -r [username@host:path] -l path -n [not upload file config] -sde
 	option:
